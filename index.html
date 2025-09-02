@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aether Med</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/dicom-parser@1.8.18/dist/dicomParser.min.js"></script>
+    <script src="https://unpkg.com/cornerstone-core@2.6.0/dist/cornerstone.min.js"></script>
+    <script src="https://unpkg.com/cornerstone-wado-image-loader@2.0.0/dist/cornerstoneWADOImageLoader.min.js"></script>
+    <script src="https://unpkg.com/dcmjs@0.17.0/build/dcmjs.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0d1117;
+            color: #c9d1d9;
+        }
+        .animate-fade-in-down {
+            animation: fadeInDown 0.5s ease-out;
+        }
+        @keyframes fadeInDown {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        .animate-fade-in {
+            animation: fadeIn 1s ease-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        .animate-pop-in {
+            animation: popIn 0.6s cubic-bezier(0.68, -0.55, 0.27, 1.55);
+        }
+        @keyframes popIn {
+            0% { transform: scale(0.5); opacity: 0; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+    </style>
+</head>
+<body class="p-8">
+
+<div id="root"></div>
+
+<script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+    const { createRoot } = ReactDOM;
+
+    // The main application component
+    const App = () => {
+        const [view, setView] = useState('home');
+        const [ctScanFile, setCtScanFile] = useState(null);
+        const [ctScanUrl, setCtScanUrl] = useState(null);
+        const [analysisResult, setAnalysisResult] = useState(null);
+        const [isLoading, setIsLoading] = useState(false);
+        const [message, setMessage] = useState('');
+        const canvasRef = useRef(null);
+        
+        // This effect ensures cornerstone is set up correctly after the component mounts
+        useEffect(() => {
+            if (window.cornerstone && window.dicomParser) {
+                window.cornerstoneWADOImageLoader.external.cornerstone = window.cornerstone;
+                window.cornerstoneWADOImageLoader.external.dicomParser = window.dicomParser;
+
+                const config = {
+                    maxWebWorkers: navigator.hardwareConcurrency || 1,
+                    startWebWorkersOnDemand: true,
+                    webWorkerTaskPaths: [],
+                };
+                window.cornerstoneWADOImageLoader.webWorkerManager.initialize(config);
+
+                console.log("Cornerstone libraries initialized.");
+            }
+        }, []);
+
+        const showMessage = (msg) => {
+            setMessage(msg);
+            setTimeout(() => setMessage(''), 3000);
+        };
+
+        const handleFileChange = async (event) => {
+            const file = event.target.files[0];
+            if (!file) {
+                setCtScanFile(null);
+                setCtScanUrl(null);
+                setAnalysisResult(null);
+                return;
+            }
+            setCtScanFile(file);
+            setAnalysisResult(null);
+            const isDicom = file.name.toLowerCase().endsWith('.dcm');
+            if (isDicom) {
+                try {
+                    const arrayBuffer = await file.arrayBuffer();
+                    const byteArray = new Uint8Array(arrayBuffer);
+                    const dataSet = dicomParser.parseDicom(byteArray);
+                    
+                    const pixelData = dataSet.elements.x7fe00010;
+                    if (!pixelData) {
+                        throw new Error("No pixel data found in DICOM file.");
+                    }
+
+                    const width = dataSet.elements.x00280011.value;
+                    const height = dataSet.elements.x00280010.value;
+                    const bitsAllocated = dataSet.elements.x00280100.value;
+
+                    let pixelArray = new Uint8Array(width * height);
+                    let minPixelValue = Infinity;
+                    let maxPixelValue = -Infinity;
+                    
+                    if (bitsAllocated === 16) {
+                        const int16View = new Int16Array(arrayBuffer, pixelData.position, width * height);
+                        for(let i = 0; i < int16View.length; i++) {
+                            const value = int16View[i];
+                            if (value > maxPixelValue) maxPixelValue = value;
+                            if (value < minPixelValue) minPixelValue = value;
+                        }
+                        const slope = 255 / (maxPixelValue - minPixelValue);
+                        const intercept = -minPixelValue * slope;
+                        for(let i = 0; i < int16View.length; i++) {
+                            pixelArray[i] = slope * int16View[i] + intercept;
+                        }
+                    } else {
+                        const uint8View = new Uint8Array(arrayBuffer, pixelData.position, width * height);
+                        pixelArray = uint8View;
+                    }
+
+                    const canvas = document.createElement('canvas');
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    const imageData = ctx.createImageData(width, height);
+                    for(let i=0; i<pixelArray.length; i++) {
+                        const val = pixelArray[i];
+                        imageData.data[i*4] = val;
+                        imageData.data[i*4 + 1] = val;
+                        imageData.data[i*4 + 2] = val;
+                        imageData.data[i*4 + 3] = 255;
+                    }
+                    ctx.putImageData(imageData, 0, 0);
+                    setCtScanUrl(canvas.toDataURL('image/png'));
+                } catch (error) {
+                    console.error("DICOM to PNG conversion failed:", error);
+                    showMessage("Failed to preview DICOM file.");
+                    setCtScanUrl(null);
+                }
+            } else {
+                const url = URL.createObjectURL(file);
+                setCtScanUrl(url);
+            }
+        };
+
+        const handleAnalyzeClick = async () => {
+            if (!ctScanFile) {
+                showMessage('Please upload a CT scan image first.');
+                return;
+            }
+            setIsLoading(true);
+
+            // Create a FormData object to send the image file
+            const formData = new FormData();
+            formData.append('image', ctScanFile, ctScanFile.name);
+
+            try {
+                const response = await fetch('http://localhost:5000/analyze_ct_scan', {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const result = await response.json();
+                setAnalysisResult({
+                    isTumor: result.isTumor,
+                    classification: result.classification,
+                    confidence: result.detections.length > 0 ? result.detections[0].confidence.toFixed(2) : 'N/A',
+                    highlight: result.detections.length > 0 ? result.detections[0].highlight : [],
+                    size: 'N/A'
+                });
+
+                if (result.isTumor) {
+                    showMessage(`Tumor detected! Type: ${result.classification}. Confidence: ${result.detections[0].confidence.toFixed(2)}`);
+                } else {
+                    showMessage('No tumor detected.');
+                }
+            } catch (error) {
+                console.error("Error analyzing CT scan:", error);
+                showMessage('Analysis failed. Check the console for details.');
+            } finally {
+                setIsLoading(false);
+            }
+        };
+
+        const drawImageAndHighlight = async () => {
+            const canvas = canvasRef.current;
+            if (!canvas || !ctScanUrl) return;
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            const img = new Image();
+            img.onload = () => {
+                canvas.width = img.width;
+                canvas.height = img.height;
+                ctx.drawImage(img, 0, 0);
+
+                if (analysisResult?.isTumor && analysisResult.highlight.length > 0) {
+                    const [x, y, width, height] = analysisResult.highlight;
+                    ctx.strokeStyle = analysisResult.classification === 'Malignant' ? '#FF0000' : '#FFFF00';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(x, y, width, height);
+                }
+            };
+            img.src = ctScanUrl;
+        };
+
+        useEffect(() => {
+            if (ctScanUrl) {
+                drawImageAndHighlight();
+            }
+        }, [ctScanUrl, analysisResult]);
+
+        const HomePage = () => (
+            <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 animate-fade-in">
+                <div className="text-center p-8 bg-gray-800 rounded-xl shadow-lg max-w-2xl w-full border border-gray-700">
+                    <h1 className="text-6xl font-extrabold mb-4 text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-600">Aether Med</h1>
+                    <p className="text-xl text-gray-400 mb-8">
+                        Advanced AI for accurate tumor detection and classification from medical scans.
+                    </p>
+                    <button
+                        onClick={() => setView('analysis')}
+                        className="py-4 px-8 bg-blue-600 text-white font-bold rounded-lg text-lg hover:bg-blue-700 transition-colors shadow-lg transform hover:scale-105"
+                    >
+                        Start Analysis
+                    </button>
+                </div>
+            </div>
+        );
+
+        const AnalysisPage = () => (
+            <div className="flex flex-col items-center p-6 bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 min-h-screen animate-fade-in">
+                <div className="bg-gray-800 p-8 rounded-xl shadow-lg w-full max-w-6xl border border-gray-700">
+                    <div className="flex justify-between items-center mb-6">
+                        <h1 className="text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-600">Aether Scanner</h1>
+                        <button
+                            onClick={() => {
+                                setView('home');
+                                setCtScanFile(null);
+                                setCtScanUrl(null);
+                                setAnalysisResult(null);
+                            }}
+                            className="text-blue-500 hover:text-blue-400 font-semibold transition-colors transform hover:scale-105"
+                        >
+                            ← Back to Home
+                        </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        {/* Input Box */}
+                        <div className="bg-gray-700 p-6 rounded-lg shadow-inner flex flex-col items-center h-full border border-gray-600">
+                            <h2 className="text-2xl font-bold mb-4 text-gray-200">Input</h2>
+                            <label className="w-full h-48 border-2 border-dashed rounded-lg flex items-center justify-center cursor-pointer hover:bg-gray-600 transition-colors bg-gradient-to-br from-purple-600 to-cyan-500 border-transparent text-white font-bold">
+                                <span className="text-lg font-medium text-center">Click or drag an image here<br/><span className="text-sm text-gray-200">(supports .dcm, .png, .jpg)</span></span>
+                                <input type="file" onChange={handleFileChange} className="hidden" accept=".dcm, .png, .jpg, .jpeg" />
+                            </label>
+                            
+                            <div className="w-full mt-4 flex justify-center items-center h-96 relative bg-gray-800 rounded-lg shadow-inner overflow-hidden">
+                                {ctScanUrl ? (
+                                    <canvas ref={canvasRef} className="max-w-full max-h-full"></canvas>
+                                ) : (
+                                    <span className="text-gray-500 text-center font-medium">Image Preview</span>
+                                )}
+                            </div>
+
+                            <button
+                                onClick={handleAnalyzeClick}
+                                className={`mt-4 w-full py-3 rounded-lg text-white font-semibold transition-colors transform hover:scale-105
+                                    ${isLoading ? 'bg-gray-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}
+                                `}
+                                disabled={isLoading}
+                            >
+                                {isLoading ? (
+                                    <svg className="animate-spin h-5 w-5 text-white inline-block" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                ) : (
+                                    'Analyze'
+                                )}
+                            </button>
+                        </div>
+
+                        {/* Output Box */}
+                        <div className="bg-gray-700 p-6 rounded-lg shadow-inner flex flex-col justify-between h-full border border-gray-600">
+                            <h2 className="text-2xl font-bold mb-4 text-gray-200">Output</h2>
+                            <div className="flex-grow flex items-center justify-center text-center">
+                                {analysisResult ? (
+                                    <div className="p-6 bg-gray-600 rounded-lg w-full">
+                                        <div className="text-gray-300">
+                                            <div className="mb-4"><span className="font-semibold text-gray-100">Tumor Detected:</span> {analysisResult.isTumor ? 'Yes' : 'No'}</div>
+                                            {analysisResult.isTumor && (
+                                                <>
+                                                    <div className="mb-4"><span className="font-semibold text-gray-100">Classification:</span> {analysisResult.classification}</div>
+                                                    <div className="mb-4"><span className="font-semibold text-gray-100">Confidence:</span> {analysisResult.confidence}</div>
+                                                </>
+                                            )}
+                                        </div>
+                                        <div className="flex justify-center mt-6">
+                                            <span className="inline-block px-4 py-2 rounded-full text-sm font-semibold border-2" style={{
+                                                borderColor: analysisResult.classification === 'Malignant' ? '#FF0000' : '#FFFF00',
+                                                color: analysisResult.classification === 'Malignant' ? '#FF0000' : '#FFFF00'
+                                            }}>
+                                                {analysisResult.isTumor ? analysisResult.classification.toUpperCase() : 'NO TUMOR'}
+                                            </span>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <span className="text-gray-500 text-lg font-medium">Analysis results will appear here.</span>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                {message && (
+                    <div className="fixed bottom-4 left-1/2 transform -translate-x-1/2 bg-gray-900 text-white px-6 py-3 rounded-lg shadow-xl animate-fade-in-down transition-opacity duration-300">
+                        {message}
+                    </div>
+                )}
+            </div>
+        );
+
+        return (
+            <div>
+                {view === 'home' && <HomePage />}
+                {view === 'analysis' && <AnalysisPage />}
+            </div>
+        );
+    };
+
+    const rootElement = document.getElementById('root');
+    const root = createRoot(rootElement);
+    root.render(<App />);
+</script>
+</body>
+</html>
