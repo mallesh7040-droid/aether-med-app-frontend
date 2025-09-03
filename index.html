@@ -64,6 +64,7 @@
         const [analysisResult, setAnalysisResult] = useState(null);
         const [isLoading, setIsLoading] = useState(false);
         const [message, setMessage] = useState('');
+        const [aiReport, setAiReport] = useState('');
         const canvasRef = useRef(null);
         
         // This effect ensures cornerstone is set up correctly after the component mounts
@@ -98,6 +99,8 @@
             }
             setCtScanFile(file);
             setAnalysisResult(null);
+            setAiReport('');
+
             const isDicom = file.name.toLowerCase().endsWith('.dcm');
             if (isDicom) {
                 try {
@@ -166,39 +169,91 @@
                 return;
             }
             setIsLoading(true);
+            setAiReport('');
 
-            // Create a FormData object to send the image file
-            const formData = new FormData();
-            formData.append('image', ctScanFile, ctScanFile.name);
+            const fileReader = new FileReader();
+            fileReader.readAsDataURL(ctScanFile);
+            fileReader.onloadend = async () => {
+                const base64data = fileReader.result;
+                const payload = {
+                    image: base64data
+                };
+
+                try {
+                    const response = await fetch('https://aether-med-backend.onrender.com/analyze_ct_scan', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(payload)
+                    });
+                    
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    const result = await response.json();
+                    
+                    setAnalysisResult({
+                        isTumor: result.isTumor,
+                        classification: result.classification,
+                        confidence: result.detections[0].confidence,
+                        highlight: result.detections[0].highlight,
+                        visualization: result.visualization,
+                    });
+                    
+                    if (result.isTumor) {
+                        showMessage(`Tumor detected! Type: ${result.classification}. Confidence: ${result.detections[0].confidence}`);
+                    } else {
+                        showMessage('No tumor detected.');
+                    }
+                } catch (error) {
+                    console.error("Error analyzing CT scan:", error);
+                    showMessage('Analysis failed. Check the console for details.');
+                    setAnalysisResult(null);
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+        };
+        
+        const handleGetAiReport = async () => {
+            if (!analysisResult) {
+                showMessage('Please run an analysis first.');
+                return;
+            }
+
+            const systemPrompt = "You are a friendly and professional medical assistant. Your task is to explain a CT scan analysis report to a patient in simple, non-technical terms. Avoid using jargon and focus on clarity and reassurance.";
+
+            const userQuery = `I have a CT scan analysis report with the following results:
+- **Tumor Detected:** ${analysisResult.isTumor ? 'Yes' : 'No'}
+- **Classification:** ${analysisResult.classification}
+- **Confidence:** ${analysisResult.confidence}`;
+            
+            const apiKey = ""; 
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
 
             try {
-                const response = await fetch('https://aether-med-backend.onrender.com/analyze_ct_scan', {
+                const response = await fetch(apiUrl, {
                     method: 'POST',
-                    body: formData,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{ parts: [{ text: userQuery }] }],
+                        systemInstruction: { parts: [{ text: systemPrompt }] },
+                    })
                 });
 
                 if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
+                    throw new Error(`API error: ${response.status}`);
                 }
+                
                 const result = await response.json();
-                setAnalysisResult({
-                    isTumor: result.isTumor,
-                    classification: result.classification,
-                    confidence: result.detections.length > 0 ? result.detections[0].confidence.toFixed(2) : 'N/A',
-                    highlight: result.detections.length > 0 ? result.detections[0].highlight : [],
-                    size: 'N/A'
-                });
-
-                if (result.isTumor) {
-                    showMessage(`Tumor detected! Type: ${result.classification}. Confidence: ${result.detections[0].confidence.toFixed(2)}`);
-                } else {
-                    showMessage('No tumor detected.');
-                }
+                const aiResponseText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+                setAiReport(aiResponseText);
+                showMessage("AI report generated successfully.");
             } catch (error) {
-                console.error("Error analyzing CT scan:", error);
-                showMessage('Analysis failed. Check the console for details.');
-            } finally {
-                setIsLoading(false);
+                console.error("Error generating AI report:", error);
+                showMessage("Failed to generate AI report. Please try again.");
+                setAiReport('');
             }
         };
 
@@ -214,11 +269,14 @@
                 canvas.height = img.height;
                 ctx.drawImage(img, 0, 0);
 
-                if (analysisResult?.isTumor && analysisResult.highlight.length > 0) {
-                    const [x, y, width, height] = analysisResult.highlight;
+                if (analysisResult?.isTumor && analysisResult.highlight) {
+                    const [x_min, y_min, x_max, y_max] = analysisResult.highlight;
+                    const width = x_max - x_min;
+                    const height = y_max - y_min;
+
                     ctx.strokeStyle = analysisResult.classification === 'Malignant' ? '#FF0000' : '#FFFF00';
                     ctx.lineWidth = 2;
-                    ctx.strokeRect(x, y, width, height);
+                    ctx.strokeRect(x_min, y_min, width, height);
                 }
             };
             img.src = ctScanUrl;
@@ -311,7 +369,7 @@
                                             {analysisResult.isTumor && (
                                                 <>
                                                     <div className="mb-4"><span className="font-semibold text-gray-100">Classification:</span> {analysisResult.classification}</div>
-                                                    <div className="mb-4"><span className="font-semibold text-gray-100">Confidence:</span> {analysisResult.confidence}</div>
+                                                    <div className="mb-4"><span className="font-semibold text-gray-100">Confidence:</span> {analysisResult.confidence.toFixed(2)}</div>
                                                 </>
                                             )}
                                         </div>
@@ -328,6 +386,22 @@
                                     <span className="text-gray-500 text-lg font-medium">Analysis results will appear here.</span>
                                 )}
                             </div>
+                            
+                            {analysisResult && (
+                                <div className="mt-6 w-full space-y-4">
+                                    <button 
+                                        onClick={handleGetAiReport}
+                                        className="w-full py-3 rounded-lg bg-indigo-600 text-white font-semibold transition-colors hover:bg-indigo-700 transform hover:scale-105"
+                                    >
+                                        Get AI Report
+                                    </button>
+                                    {aiReport && (
+                                        <div className="p-4 bg-gray-600 rounded-lg text-gray-300 text-sm animate-pop-in">
+                                            {aiReport}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>
